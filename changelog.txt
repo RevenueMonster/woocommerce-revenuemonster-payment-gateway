@@ -1,0 +1,7 @@
+*** WooCommerce RevenueMonster Payment Gateway ***
+
+2020-08-10 - version 1.0.5
+* Latest release
+
+2020-08-01 - version 1.0.0
+* Initial release
