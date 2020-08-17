@@ -1,5 +1,5 @@
 {
-  "name": "woocommerce-revenuemonster-payment-gateway",
+  "name": "revenuemonster/woocommerce-revenuemonster-payment-gateway",
   "description": "Revenue Monster Payment Gateway for WooCommerce",
   "license": "MIT",
   "authors": [
