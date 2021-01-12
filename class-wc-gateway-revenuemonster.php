@@ -4,7 +4,7 @@
  * Description: Accept all major Malaysia e-wallet, such as TnG eWallet, Boost, Maybank QRPay & credit cards. Fast, seamless, and flexible.
  * Author: RevenueMonster
  * Author URI: https://revenuemonster.my/
- * Version: 1.0.5
+ * Version: 1.0.6
  * WC requires at least: 2.6
  * WC tested up to: 4.0.1
  *
@@ -306,7 +306,7 @@ function wc_gateway_revenuemonster_init() {
 				'storeId'       => strval( $this->get_option( 'store_id' ) ),
 				'redirectUrl'   => escape_url( $url ),
 				'notifyUrl'     => escape_url( $url ),
-				'layoutVersion' => 'v2',
+				'layoutVersion' => 'v3',
 			);
 
 			$response = $sdk->create_order( $payload );
