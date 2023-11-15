@@ -388,7 +388,7 @@ class RevenueMonster {
 			$data = '';
 			if ( ! empty( $payload ) ) {
 				array_ksort( $payload );
-				$data = base64_encode( json_encode( $payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_HEX_APOS ) );
+				$data = base64_encode( json_encode( $payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_HEX_APOS | JSON_HEX_TAG | JSON_HEX_AMP ) );
 			}
 			array_push( $arr, "data=$data" );
 		}
