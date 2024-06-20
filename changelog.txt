@@ -1,7 +1,18 @@
 *** WooCommerce RevenueMonster Payment Gateway ***
 
+2024-06-20 - version 1.0.7
+* Latest Release
+
+Fix: when no `woocommerce` and plugin installed will cause `wordpress` to crashed with critical error.
+Feat: update layoutVersion to `v4` follow our latest payment gateway version
+
+2023-11-23 - version 1.0.6
+
+Fix: invalid signature when having symbols characters
+
 2020-08-10 - version 1.0.5
-* Latest release
+
+Fix: issues
 
 2020-08-01 - version 1.0.0
 * Initial release
