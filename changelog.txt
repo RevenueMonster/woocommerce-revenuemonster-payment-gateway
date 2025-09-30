@@ -1,7 +1,11 @@
 *** WooCommerce RevenueMonster Payment Gateway ***
 
-2024-06-20 - version 1.0.7
+2025-09-29 - version 1.0.8
 * Latest Release
+
+Feat: contains proper HPOS compatibility declaration using `FeaturesUtil::declare_compatibility()`
+
+2024-06-20 - version 1.0.7
 
 Fix: when no `woocommerce` and plugin installed will cause `wordpress` to crashed with critical error.
 Feat: update layoutVersion to `v4` follow our latest payment gateway version
