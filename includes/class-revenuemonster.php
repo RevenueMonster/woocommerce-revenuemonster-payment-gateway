@@ -201,7 +201,7 @@ class RevenueMonster {
 	 * Function oauth
 	 */
 	private function oauth() {
-		$uri  = $this->get_open_api_url( 'v1', '/token', 'oauth' );
+		$uri  = $this->get_open_api_url( '/token', 'v1', 'oauth' );
 		$hash = base64_encode( $this->client_id . ':' . $this->client_secret );
 
 		$response = wp_remote_post(
@@ -247,11 +247,12 @@ class RevenueMonster {
 	/**
 	 * Function get_open_api_url
 	 *
+	 * @param string $url Url.
 	 * @param string $version Version.
 	 * @param string $url Url.
 	 * @param string $usage Usage.
 	 */
-	public function get_open_api_url( $version = 'v1', $url, $usage = 'api' ) {
+	public function get_open_api_url( $url, $version = 'v1', $usage = 'api' ) {
 		$url = trim( $url, '/' );
 		$uri = "{$this->get_domain($usage)}/$version/$url";
 		if ( $this->is_sandbox ) {
@@ -332,7 +333,7 @@ class RevenueMonster {
 	public function create_order( $payload ) {
 		$response = $this->call_api(
 			'POST',
-			$this->get_open_api_url( 'v3', '/payment/online', 'api' ),
+			$this->get_open_api_url( '/payment/online', 'v3', 'api' ),
 			$payload
 		);
 
@@ -356,7 +357,7 @@ class RevenueMonster {
 	public function query_order( $order_id ) {
 		$response = $this->call_api(
 			'GET',
-			$this->get_open_api_url( 'v3', "/payment/transaction/order/$order_id", 'api' )
+			$this->get_open_api_url( "/payment/transaction/order/$order_id", 'v3' , 'api' )
 		);
 
 		if ( ! isset( $response ) ) {
