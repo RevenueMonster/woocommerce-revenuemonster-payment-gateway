@@ -201,6 +201,19 @@ class RevenueMonster {
 	 * Function oauth
 	 */
 	private function oauth() {
+		$transient_key = 'revenuemonster_oauth_' . md5( $this->client_id );
+		$cache = get_transient($transient_key);
+
+		if (is_array($cache) && !empty($cache['access_token']) && !empty($cache['expires_at']) && time() < intval($cache['expires_at'])) {
+			error_log('[RM] Using cached OAuth token');
+
+			$this->access_token = $cache['access_token'];
+			$this->refresh_token = isset($cache['refresh_token']) ? $cache['refresh_token'] : '';
+			return;
+		}
+
+		error_log('[RM] Requesting NEW OAuth token from API');
+
 		$uri  = $this->get_open_api_url( '/token', 'v1', 'oauth' );
 		$hash = base64_encode( $this->client_id . ':' . $this->client_secret );
 
@@ -221,14 +234,39 @@ class RevenueMonster {
 			)
 		);
 
-		if ( ! is_wp_error( $response ) ) {
-			$body = wp_remote_retrieve_body( $response );
-			$body = json_decode( $body, true );
-			// $expiresIn = $body->expiresIn - 1000;
-			$this->access_token  = $body['accessToken'];
-			$this->refresh_token = $body['refreshToken'];
-			// $this->refresh_time = (new Datetime)->add(new DateInterval('PT' . $expiresIn . 'S'));
+		if ( is_wp_error( $response ) ) {
+			error_log('[RM] OAuth request failed');
+			return;
 		}
+
+		$body = wp_remote_retrieve_body($response);
+		$body = json_decode($body, true);
+
+		if (!is_array($body) || empty($body['accessToken'])) {
+			return;
+		}
+
+		$accessToken = $body['accessToken'];
+		$refreshToken = isset($body['refreshToken']) ? $body['refreshToken'] : '';
+		$expiresIn = isset($body['expiresIn']) ? intval($body['expiresIn']) : 86400;
+
+		error_log('[RM] Received new OAuth token. Expires in: ' . $expiresIn . ' seconds');
+
+		// Add buffer before actual expiry
+		$buffer_seconds = 60;
+		$cached_for = max(60, $expiresIn - $buffer_seconds);
+		$expires_at = time() + $cached_for;
+
+		$this->access_token  = $accessToken;
+		$this->refresh_token = $refreshToken;
+
+		$cache_value = array(
+			'access_token' => $accessToken,
+			'refresh_token' => $refreshToken,
+			'expires_at' => $expires_at,
+		);
+
+		set_transient($transient_key, $cache_value, $cached_for);
 	}
 
 	/**
@@ -249,7 +287,6 @@ class RevenueMonster {
 	 *
 	 * @param string $url Url.
 	 * @param string $version Version.
-	 * @param string $url Url.
 	 * @param string $usage Usage.
 	 */
 	public function get_open_api_url( $url, $version = 'v1', $usage = 'api' ) {
@@ -299,25 +336,44 @@ class RevenueMonster {
 				'X-Timestamp'   => strval( $timestamp ),
 			),
 			'timeout' => 90,
-			// 'sslverify' => false,
 		);
 
-		switch ( $method ) {
-			case 'GET':
-				if ( ! empty( $payload ) ) {
-					$args['body'] = http_build_query( $payload );
-				}
-				break;
-			default:
-				$args['body'] = wp_json_encode( $payload );
-				break;
+		if ( 'GET' === $method && ! empty( $payload ) ) {
+			$args['body'] = http_build_query( $payload );
+		} else if ( 'GET' !== $method ) {
+			$args['body'] = wp_json_encode( $payload );
 		}
 
 		$response = wp_remote_request( $url, $args );
+
+		$http_code = null;
+		if ( is_array( $response ) && isset( $response['response']['code'] ) ) {
+			$http_code = intval( $response['response']['code'] );
+		}
+
+		if ( $http_code === 401 ) {
+			error_log('[RM] Token expired or invalid. Refreshing OAuth token.');
+
+			$transient_key = 'revenuemonster_oauth_' . md5($this->client_id);
+			delete_transient($transient_key);
+			$this->oauth();
+
+			error_log('[RM] Retrying API request with refreshed token');
+
+			$args['headers']['Authorization'] = 'Bearer ' . $this->get_access_token();
+			$response = wp_remote_request( $url, $args );
+	
+			if ( is_array( $response ) && isset( $response['response']['code'] ) ) {
+				$http_code = intval( $response['response']['code'] );
+			}
+		}
+
+		if ( is_wp_error( $response ) ) {
+			return $response;
+		}
+
 		if ( empty( $response['body'] ) ) {
 			return new WP_Error( 'revenuemonster-api', 'Empty Response' );
-		} elseif ( is_wp_error( $response ) ) {
-			return $response;
 		}
 
 		$body = wp_remote_retrieve_body( $response );
