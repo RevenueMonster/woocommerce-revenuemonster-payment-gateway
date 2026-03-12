@@ -221,7 +221,7 @@ function wc_gateway_revenuemonster_init()
 						'title'   => __('Auto cancel', 'woocommerce-gateway-revenuemonster'),
 						'type'    => 'checkbox',
 						'label'   => __('Cancel on hold order if transaction not found', 'woocommerce-gateway-revenuemonster'),
-						'default' => 'no',
+						'default' => 'yes',
 					),
 
 					'title'           => array(
