@@ -1,7 +1,12 @@
 *** WooCommerce RevenueMonster Payment Gateway ***
 
-2025-09-29 - version 1.0.8
+2025-09-29 - version 1.0.9
 * Latest Release
+
+perf: implement access token caching to reduce api calls
+refactor: set auto_cancel default value to yes
+
+2025-09-29 - version 1.0.8
 
 Feat: contains proper HPOS compatibility declaration using `FeaturesUtil::declare_compatibility()`
 
