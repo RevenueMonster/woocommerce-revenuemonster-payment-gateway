@@ -1,16 +1,14 @@
 <?php
 /**
- * Plugin Name: WooCommerce RevenueMonster Payment Gateway
- * Description: Accept all major Malaysia e-wallet, such as TnG eWallet, Boost, Maybank QRPay & credit cards. Fast, seamless, and flexible.
- * Author: RevenueMonster
- * Author URI: https://revenuemonster.my/
- * Version: 1.0.9
- * WC requires at least: 3.0
- * WC tested up to: 8.2
- * Requires Plugins: woocommerce
+ * RevenueMonster API client and helper functions.
+ *
+ * This is an internal include, not the plugin entry point. The plugin header
+ * lives only in revenuemonster-gateway.php.
  *
  * @package WooCommerce_RevenueMonster_Payment_Gateway
  */
+
+defined( 'ABSPATH' ) || exit;
 
 if ( ! function_exists( 'array_ksort' ) ) {
 	/**
@@ -404,6 +402,41 @@ class RevenueMonster {
 	}
 
 	/**
+	 * Function create_card_checkout
+	 *
+	 * Card (Web) checkout for the Direct Card flow
+	 *
+	 * @param string $checkout_id Checkout ID from create_order().
+	 * @param string $method Card network method, e.g. MASTERCARD_MY.
+	 * @throws \Exception Error code.
+	 */
+	public function create_card_checkout( $checkout_id, $method ) {
+		$response = $this->call_api(
+			'POST',
+			$this->get_open_api_url( 'v3', '/payment/online/checkout', 'api' ),
+			array(
+				'checkoutId' => strval( $checkout_id ),
+				'method'     => strval( $method ),
+				'type'       => 'URL',
+			)
+		);
+
+		if ( ! isset( $response ) ) {
+			throw new Exception( 'empty response' );
+		}
+
+		if ( isset( $response->error ) ) {
+			throw new Exception( $response->error->code );
+		}
+
+		if ( ! isset( $response->item ) ) {
+			throw new Exception( 'missing card checkout item' );
+		}
+
+		return $response->item;
+	}
+
+	/**
 	 * Function query_order
 	 *
 	 * @param string $order_id Order ID.
@@ -424,6 +457,56 @@ class RevenueMonster {
 		}
 
 		return $response->item;
+	}
+
+	/**
+	 * Function get_subscription_status
+	 *
+	 * Returns the merchant's payment method subscription status, e.g.
+	 * $item->online->{'MASTERCARD.MALAYSIA'} === 'ACTIVE'.
+	 *
+	 * @throws \Exception Error code.
+	 */
+	public function get_subscription_status() {
+		$response = $this->call_api(
+			'GET',
+			$this->get_open_api_url( 'v3', '/payment/subscription/status', 'api' )
+		);
+
+		if ( ! isset( $response ) ) {
+			throw new Exception( 'empty response' );
+		}
+
+		if ( isset( $response->error ) ) {
+			throw new Exception( $response->error->code );
+		}
+
+		return isset( $response->item ) ? $response->item : null;
+	}
+
+	/**
+	 * Function get_merchant
+	 *
+	 * Returns the merchant profile, e.g. $item->isActive and
+	 * $item->subscription->directCardPayment.
+	 *
+	 * @throws \Exception Error code.
+	 */
+	public function get_merchant() {
+		$response = $this->call_api(
+			'GET',
+			$this->get_open_api_url( 'v3', '/merchant', 'api' )
+		);
+
+		if ( ! isset( $response ) ) {
+			throw new Exception( 'empty response' );
+		}
+
+		if ( isset( $response->error ) ) {
+			throw new Exception( $response->error->code );
+		}
+
+		return isset( $response->item ) ? $response->item : null;
 	}
 
 	/**
