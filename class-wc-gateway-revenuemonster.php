@@ -1,18 +1,36 @@
 <?php
 
 /**
- * Plugin Name: WooCommerce RevenueMonster Payment Gateway
- * Description: Accept all major Malaysia e-wallet, such as TnG eWallet, Boost, Maybank QRPay & credit cards. Fast, seamless, and flexible.
- * Author: RevenueMonster
- * Author URI: https://revenuemonster.my/
- * Version: 1.0.9
- * WC requires at least: 2.6
- * WC tested up to: 4.0.1
+ * Gateway bootstrap and main class.
+ *
+ * The plugin header lives in revenuemonster-gateway.php, which defines the
+ * WC_REVENUEMONSTER_* constants and then loads this file.
  *
  * @package WC_Gateway_RevenueMonster
  */
 
 defined('ABSPATH') || die('Missing global variable ABSPATH');
+
+defined('WC_REVENUEMONSTER_FILE') || define('WC_REVENUEMONSTER_FILE', __FILE__);
+defined('WC_REVENUEMONSTER_PATH') || define('WC_REVENUEMONSTER_PATH', plugin_dir_path(WC_REVENUEMONSTER_FILE));
+defined('WC_REVENUEMONSTER_URL') || define('WC_REVENUEMONSTER_URL', plugin_dir_url(WC_REVENUEMONSTER_FILE));
+
+// Declare compatibility with HPOS and the Cart & Checkout Blocks.
+add_action('before_woocommerce_init', function () {
+	if (class_exists('\Automattic\WooCommerce\Utilities\FeaturesUtil')) {
+		\Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility('custom_order_tables', WC_REVENUEMONSTER_FILE, true);
+		\Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility('cart_checkout_blocks', WC_REVENUEMONSTER_FILE, true);
+	}
+});
+
+// Register the Cart & Checkout Blocks payment method integration.
+add_action('woocommerce_blocks_payment_method_type_registration', function ($registry) {
+	if (!class_exists('Automattic\WooCommerce\Blocks\Payments\Integrations\AbstractPaymentMethodType')) {
+		return;
+	}
+	require_once WC_REVENUEMONSTER_PATH . 'includes/class-wc-revenuemonster-blocks.php';
+	$registry->register(new WC_RevenueMonster_Blocks_Support());
+});
 
 add_filter('cron_schedules', 'add_cron_minute_interval');
 
@@ -125,6 +143,215 @@ function wc_gateway_revenuemonster_init()
 
 			// Register a webhook.
 			add_action('woocommerce_api_wc_gateway_revenuemonster', array($this, 'webhook'));
+
+			// Direct Card Checkout assets (self-gating)
+			add_action('wp_enqueue_scripts', array($this, 'enqueue_direct_card_assets'));
+		}
+
+		/**
+		 * Whether the Card Checkout Mode setting is "Direct Card Checkout".
+		 *
+		 * @return bool
+		 */
+		public function is_direct_card()
+		{
+			return 'direct' === $this->get_option('card_checkout_mode', 'hosted');
+		}
+
+		/**
+		 * Check the Direct Card form should actually be offered
+		 *
+		 * @return bool
+		 */
+		public function direct_card_available()
+		{
+			$available = $this->is_direct_card() && $this->card_capability_active();
+
+			return (bool) apply_filters('wc_revenuemonster_direct_card_available', $available, $this);
+		}
+
+		/**
+		 * Stored Direct Card capability flag, refreshed on each settings save.
+		 *
+		 * @return bool
+		 */
+		protected function card_capability_active()
+		{
+			return 'yes' === $this->get_option('card_online_active');
+		}
+
+		/**
+		 * Check RM account and persist whether Direct Card Checkout is
+		 * usable. Called on settings save only
+		 * Requires BOTH: Card (Online) active in the subscription status, and an
+		 * active merchant with directCardPayment enabled. 
+		 *
+		 * @return bool
+		 */
+		protected function refresh_card_capability()
+		{
+			if (!$this->is_direct_card() || !$this->get_option('client_id')) {
+				return $this->card_capability_active();
+			}
+
+			try {
+				$sdk       = $this->get_sdk();
+				$available = $this->subscription_has_active_card($sdk->get_subscription_status())
+					&& $this->merchant_allows_direct_card($sdk->get_merchant());
+			} catch (Exception $e) {
+				self::log('Direct Card capability check failed: ' . $e->getMessage(), 'warning');
+
+				return $this->card_capability_active();
+			}
+
+			if ($available !== $this->card_capability_active()) {
+				$this->update_option('card_online_active', $available ? 'yes' : 'no');
+			}
+
+			return $available;
+		}
+
+		/**
+		 * Merchant is active AND has Direct Card Payment enabled.
+		 *
+		 * @param object|null $item Merchant profile from get_merchant().
+		 * @return bool
+		 */
+		protected function merchant_allows_direct_card($item)
+		{
+			return is_object($item)
+				&& !empty($item->isActive)
+				&& isset($item->subscription)
+				&& !empty($item->subscription->directCardPayment);
+		}
+
+		/**
+		 * Look for item.online["MASTERCARD.MALAYSIA"] === "ACTIVE" (case-insensitive).
+		 *
+		 * @param object|null $item Subscription status item.
+		 * @return bool
+		 */
+		protected function subscription_has_active_card($item)
+		{
+			$method = apply_filters('wc_revenuemonster_card_capability_method', 'MASTERCARD.MALAYSIA');
+
+			if (!is_object($item) || !isset($item->online)) {
+				return false;
+			}
+
+			foreach ((array) $item->online as $name => $status) {
+				if (0 === strcasecmp($name, $method) && 0 === strcasecmp((string) $status, 'ACTIVE')) {
+					return true;
+				}
+			}
+
+			return false;
+		}
+
+		/**
+		 * The pay option chosen on checkout when Direct Card mode is on.
+		 *
+		 * @return string 'card' or 'hosted'.
+		 */
+		protected function get_posted_pay_mode()
+		{
+			$mode = isset($_POST['rm_pay_mode']) ? sanitize_key(wp_unslash($_POST['rm_pay_mode'])) : '';
+
+			return in_array($mode, array('card', 'hosted'), true) ? $mode : 'hosted';
+		}
+
+		/**
+		 * Enqueue the Direct Card Checkout script/style on the checkout page only.
+		 */
+		public function enqueue_direct_card_assets()
+		{
+			if (!function_exists('is_checkout') || !is_checkout() || is_order_received_page()) {
+				return;
+			}
+			if ('yes' !== $this->enabled || !$this->direct_card_available()) {
+				return;
+			}
+
+			$base = plugins_url('assets/', __FILE__);
+			$ver  = '1.0.10';
+
+			wp_enqueue_style('rm-direct-card', $base . 'css/rm-direct-card.css', array(), $ver);
+			wp_enqueue_script('rm-direct-card', $base . 'js/rm-direct-card.js', array('jquery', 'wc-checkout'), $ver, true);
+			wp_localize_script(
+				'rm-direct-card',
+				'rmDirectCard',
+				array(
+					'ajaxUrl' => admin_url('admin-ajax.php'),
+					'nonce'   => wp_create_nonce('rm_direct_card'),
+					'i18n'    => array(
+						'invalidNumber' => __('Please enter a valid card number.', 'woocommerce-gateway-revenuemonster'),
+						'invalidName'   => __('Please enter the cardholder name.', 'woocommerce-gateway-revenuemonster'),
+						'invalidExpiry' => __('Please enter a valid expiry date.', 'woocommerce-gateway-revenuemonster'),
+						'invalidCvv'    => __('Please enter a valid security code.', 'woocommerce-gateway-revenuemonster'),
+						'generic'       => __('We could not process your card. Please try again.', 'woocommerce-gateway-revenuemonster'),
+						'authInProgress' => __('Completing bank authentication…', 'woocommerce-gateway-revenuemonster'),
+						'cancel'        => __('Cancel payment', 'woocommerce-gateway-revenuemonster'),
+						'cancelled'     => __('Payment cancelled. You have not been charged.', 'woocommerce-gateway-revenuemonster'),
+					),
+				)
+			);
+		}
+
+		/**
+		 * Render the payment method fields on checkout.
+		 *
+		 * Direct Card mode adds a "Card" / "E-wallet / Online Banking" choice; the
+		 * card inputs carry no `name` attribute so card data never enters the
+		 * WooCommerce checkout POST. Hosted mode shows the description only.
+		 */
+		public function payment_fields()
+		{
+			if ($this->description) {
+				echo wpautop(wptexturize(wp_kses_post($this->description)));
+			}
+
+			if (!$this->direct_card_available()) {
+				return;
+			}
+
+			?>
+			<div class="rm-pay-modes" id="rm-pay-modes">
+				<p class="form-row form-row-wide rm-pay-mode">
+					<label>
+						<input type="radio" name="rm_pay_mode" value="card" checked="checked" />
+						<span><?php esc_html_e('Card', 'woocommerce-gateway-revenuemonster'); ?></span>
+					</label>
+				</p>
+
+				<div class="rm-direct-card" id="rm-direct-card-fields">
+					<p class="form-row form-row-wide rm-dc-row">
+						<label for="rm-card-name"><?php esc_html_e('Cardholder Name', 'woocommerce-gateway-revenuemonster'); ?> <span class="required">*</span></label>
+						<input id="rm-card-name" type="text" autocomplete="cc-name" class="input-text" placeholder="<?php esc_attr_e('Name as printed on card', 'woocommerce-gateway-revenuemonster'); ?>" />
+					</p>
+					<p class="form-row form-row-wide rm-dc-row">
+						<label for="rm-card-number"><?php esc_html_e('Card Number', 'woocommerce-gateway-revenuemonster'); ?> <span class="required">*</span></label>
+						<input id="rm-card-number" type="text" inputmode="numeric" autocomplete="cc-number" maxlength="23" class="input-text" placeholder="1234 5678 9012 3456" />
+					</p>
+					<p class="form-row form-row-wide rm-dc-row">
+						<label for="rm-card-expiry"><?php esc_html_e('Expiry (MM / YY)', 'woocommerce-gateway-revenuemonster'); ?> <span class="required">*</span></label>
+						<input id="rm-card-expiry" type="text" inputmode="numeric" autocomplete="cc-exp" placeholder="MM / YY" maxlength="7" class="input-text" />
+					</p>
+					<p class="form-row form-row-wide rm-dc-row">
+						<label for="rm-card-cvv"><?php esc_html_e('Security Code / CVV', 'woocommerce-gateway-revenuemonster'); ?> <span class="required">*</span></label>
+						<input id="rm-card-cvv" type="text" inputmode="numeric" autocomplete="cc-csc" maxlength="4" class="input-text" placeholder="CVV" />
+					</p>
+					<div class="rm-direct-card__notice" style="display:none"></div>
+				</div>
+
+				<p class="form-row form-row-wide rm-pay-mode">
+					<label>
+						<input type="radio" name="rm_pay_mode" value="hosted" />
+						<span><?php esc_html_e('E-wallet / Online Banking', 'woocommerce-gateway-revenuemonster'); ?></span>
+					</label>
+				</p>
+				<p class="rm-pay-mode__hint"><?php esc_html_e('You will be redirected to Revenue Monster to complete payment.', 'woocommerce-gateway-revenuemonster'); ?></p>
+			</div>
+			<?php
 		}
 
 		/**
@@ -224,6 +451,18 @@ function wc_gateway_revenuemonster_init()
 						'default' => 'yes',
 					),
 
+					'card_checkout_mode' => array(
+						'title'       => __('Card Checkout Mode', 'woocommerce-gateway-revenuemonster'),
+						'type'        => 'select',
+						'description' => __('Hosted Checkout redirects the customer to the Revenue Monster payment page (default). Direct Card Checkout shows a card form on the WooCommerce checkout (submitted straight to Revenue Monster), plus a "E-wallet / Online Banking" option that uses the hosted redirect.', 'woocommerce-gateway-revenuemonster'),
+						'desc_tip'    => true,
+						'default'     => 'hosted',
+						'options'     => array(
+							'hosted' => __('Hosted Checkout', 'woocommerce-gateway-revenuemonster'),
+							'direct' => __('Direct Card Checkout', 'woocommerce-gateway-revenuemonster'),
+						),
+					),
+
 					'title'           => array(
 						'title'       => __('Title', 'woocommerce-gateway-revenuemonster'),
 						'type'        => 'text',
@@ -285,6 +524,32 @@ function wc_gateway_revenuemonster_init()
 		}
 
 		/**
+		 * Settings screen: while "Direct Card Checkout" is selected, warn if the
+		 * account does not support it.
+		 */
+		public function admin_options()
+		{
+			if ($this->is_direct_card() && $this->get_option('client_id') && !$this->card_capability_active()) {
+				echo '<div class="notice notice-warning inline"><p>';
+				echo wp_kses_post(__('<strong>Direct Card Checkout</strong> is not enabled on this Revenue Monster account, so selecting it will fall back to the hosted Revenue Monster page. Ask Revenue Monster to enable Direct Card Payment, then re-save these settings.', 'woocommerce-gateway-revenuemonster'));
+				echo '</p></div>';
+			}
+
+			parent::admin_options();
+		}
+
+		/**
+		 * Refresh the stored Direct Card capability flag on every settings save.
+		 */
+		public function process_admin_options()
+		{
+			$saved = parent::process_admin_options();
+			$this->refresh_card_capability();
+
+			return $saved;
+		}
+
+		/**
 		 * Function get_sdk
 		 */
 		public function get_sdk()
@@ -309,7 +574,10 @@ function wc_gateway_revenuemonster_init()
 		public function process_payment($order_id)
 		{
 			global $woocommerce;
-			$order = new WC_Order($order_id);
+			$order = wc_get_order($order_id);
+			if (!$order) {
+				return array('result' => 'failure');
+			}
 
 			$oid = $order_id . '-' . time();
 			$order->set_transaction_id($oid);
@@ -335,6 +603,11 @@ function wc_gateway_revenuemonster_init()
 				'layoutVersion' => 'v4',
 			);
 
+			// Direct Card mode + "Card" chosen: run the client-side card flow.
+			if ($this->direct_card_available() && 'hosted' !== $this->get_posted_pay_mode()) {
+				return $this->process_direct_card_payment($order, $oid, $sdk, $payload);
+			}
+
 			$response = $sdk->create_order($payload);
 
 			$order->update_status('on-hold', __('Awaiting payment', 'woocommerce-gateway-revenuemonster'));
@@ -351,31 +624,221 @@ function wc_gateway_revenuemonster_init()
 		}
 
 		/**
+		 * Direct Card Checkout server side: create the order and the card checkout,
+		 * then return a handle for the browser to submit the card details + 3DS.
+		 * Card data never reaches this server; the final status comes from the
+		 * webhook / query_order flow.
+		 *
+		 * @param WC_Order       $order   Order.
+		 * @param string         $oid     Revenue Monster order id (transaction id).
+		 * @param RevenueMonster $sdk     SDK instance.
+		 * @param array          $payload create_order payload.
+		 * @return array
+		 */
+		protected function process_direct_card_payment($order, $oid, $sdk, $payload)
+		{
+			// RM routes through MASTERCARD_MY;
+			$method = apply_filters('wc_revenuemonster_card_method', 'MASTERCARD_MY', $order);
+
+			try {
+				$checkout = $sdk->create_order($payload);
+				if (!isset($checkout->checkoutId)) {
+					throw new Exception('missing checkoutId');
+				}
+
+				$card = $sdk->create_card_checkout($checkout->checkoutId, $method);
+				// RM returns the id as `checkoutId`; older docs/builds call it `id`. Accept either.
+				$card_code = !empty($card->checkoutId) ? $card->checkoutId : (!empty($card->id) ? $card->id : '');
+				if (empty($card_code) || empty($card->url)) {
+					throw new Exception('missing card checkout');
+				}
+			} catch (Exception $e) {
+				self::log('Direct card checkout failed for order ' . $order->get_id() . ': ' . $e->getMessage(), 'error');
+				wc_add_notice(__('We could not start the card payment. Please try again or choose another payment method.', 'woocommerce-gateway-revenuemonster'), 'error');
+
+				return array('result' => 'failure');
+			}
+
+			$order->update_status('on-hold', __('Awaiting card payment', 'woocommerce-gateway-revenuemonster'));
+
+			// Card endpoint origin only (no query string) for the browser POST.
+			$endpoint = strtok($card->url, '?');
+
+			// Gate the status endpoint for ~30 min without exposing the oid long term.
+			set_transient('rm_direct_card_' . $oid, $order->get_order_key(), 30 * MINUTE_IN_SECONDS);
+
+			$return_url = $order->get_checkout_order_received_url();
+			$fail_url   = wc_get_checkout_url();
+
+			return array(
+				'result'   => 'success',
+				// Fallback redirect if our script never runs; cart stays intact.
+				'redirect' => $fail_url,
+				// Nested handle for the classic [woocommerce_checkout] flow.
+				'rm_card'  => array(
+					'endpoint'  => esc_url_raw($endpoint),
+					'code'      => strval($card_code),
+					'oid'       => strval($oid),
+					'key'       => $order->get_order_key(),
+					'returnUrl' => $return_url,
+					'failUrl'   => $fail_url,
+				),
+				// Flat mirror for the Blocks flow: the Store API casts every
+				// payment-detail value to string, so a nested array cannot survive.
+				'rm_card_endpoint'   => esc_url_raw($endpoint),
+				'rm_card_code'       => strval($card_code),
+				'rm_card_oid'        => strval($oid),
+				'rm_card_key'        => $order->get_order_key(),
+				'rm_card_return_url' => $return_url,
+				'rm_card_fail_url'   => $fail_url,
+			);
+		}
+
+		/**
+		 * AJAX: report the real payment status for a Direct Card order.
+		 *
+		 * Reuses the existing query_order() so the order lifecycle stays in one
+		 * place. A 3DS_CHALLENGE alone never marks the order paid.
+		 */
+		public function ajax_card_status()
+		{
+			check_ajax_referer('rm_direct_card', 'nonce');
+
+			$oid = isset($_POST['oid']) ? sanitize_text_field(wp_unslash($_POST['oid'])) : '';
+			$key = isset($_POST['key']) ? sanitize_text_field(wp_unslash($_POST['key'])) : '';
+
+			$parts = explode('-', $oid);
+			if (count($parts) !== 2 || $key === '' || get_transient('rm_direct_card_' . $oid) !== $key) {
+				wp_send_json_error(array('status' => 'invalid'), 400);
+			}
+
+			$order = wc_get_order(absint($parts[0]));
+			if (!$order || !hash_equals($order->get_order_key(), $key)) {
+				wp_send_json_error(array('status' => 'invalid'), 400);
+			}
+
+			if ($order->is_paid()) {
+				wp_send_json_success(array('status' => 'success', 'redirect' => $order->get_checkout_order_received_url()));
+			}
+
+			$op = isset($_POST['op']) ? sanitize_key(wp_unslash($_POST['op'])) : '';
+
+			// Customer aborted from the 3DS modal: cancel now rather than wait for
+			// the requery cron. Stock is untouched and the cart intact, so a retry
+			// just works.
+			if ('cancel' === $op) {
+				if (!$order->has_status(array('cancelled', 'failed', 'refunded'))) {
+					$order->update_status('cancelled', __('Card payment cancelled by customer.', 'woocommerce-gateway-revenuemonster'));
+				}
+				delete_transient('rm_direct_card_' . $oid);
+				wc_add_notice(__('Payment cancelled. You have not been charged.', 'woocommerce-gateway-revenuemonster'), 'notice');
+				// Force a fresh order on the next attempt.
+				if (WC()->session) {
+					unset(WC()->session->order_awaiting_payment);
+				}
+				wp_send_json_success(array('status' => 'cancelled', 'redirect' => wc_get_checkout_url()));
+			}
+
+			try {
+				$response = $this->get_sdk()->query_order($oid);
+				$status   = isset($response->status) ? strtoupper($response->status) : 'PENDING';
+			} catch (Exception $e) {
+				wp_send_json_success(array('status' => 'pending'));
+			}
+
+			if ('SUCCESS' === $status) {
+				if (!empty($response->method)) {
+					$order->set_payment_method($response->method);
+				}
+				$order->payment_complete(isset($response->transactionId) ? $response->transactionId : '');
+				$order->save();
+				if (WC()->cart) {
+					WC()->cart->empty_cart();
+				}
+				delete_transient('rm_direct_card_' . $oid);
+				wp_send_json_success(array('status' => 'success', 'redirect' => $order->get_checkout_order_received_url()));
+			}
+
+			if ('FAILED' === $status) {
+				$order->update_status('failed', __('Card payment failed', 'woocommerce-gateway-revenuemonster'));
+				$order->save();
+				delete_transient('rm_direct_card_' . $oid);
+				wp_send_json_success(array('status' => 'failed', 'redirect' => wc_get_checkout_url()));
+			}
+
+			wp_send_json_success(array('status' => 'pending'));
+		}
+
+		/**
 		 * Function webhook
 		 *
 		 * @throws \Exception Invalid webhook response.
 		 */
 		public function webhook()
 		{
-			if (empty($_GET['orderId'])) {
-				wp_die('RevenueMonster payment failed', 'RevenueMonster Payment', array('response' => 500));
-				return;
+			// Same endpoint for the hosted checkout redirectUrl and the S2S
+			// notifyUrl. Only the browser redirect carries a ?status= param.
+			$is_browser = isset($_GET['status']);
+
+			// Browser hits finish with a redirect (+ optional notice); the S2S
+			// notify finishes with a bare 200.
+			$finish = function ($order, $url, $notice = '', $type = 'error') use ($is_browser) {
+				if ($is_browser) {
+					if ('' !== $notice
+						&& function_exists('wc_add_notice')
+						&& function_exists('wc_has_notice')
+						&& ! wc_has_notice($notice, $type)
+					) {
+						wc_add_notice($notice, $type);
+					}
+					wp_safe_redirect($url ? $url : wc_get_checkout_url());
+				} else {
+					status_header(200);
+				}
+				exit;
+			};
+
+			$raw   = isset($_GET['orderId']) ? sanitize_text_field(wp_unslash($_GET['orderId'])) : '';
+			$parts = explode('-', $raw);
+			if ('' === $raw || count($parts) !== 2 || ! ctype_digit($parts[0])) {
+				$finish(null, wc_get_checkout_url(), __('We could not verify your payment. Please try again.', 'woocommerce-gateway-revenuemonster'));
 			}
 
-			$oid      = sanitize_key(wp_unslash($_GET['orderId']));
-			$order_id = explode('-', $oid);
-			if (count($order_id) !== 2) {
-				wp_die('RevenueMonster payment failed', 'RevenueMonster Payment', array('response' => 500));
-				return;
+			$oid   = $raw;
+			$order = wc_get_order(absint($parts[0]));
+			if (! $order) {
+				$finish(null, wc_get_checkout_url(), __('Order not found.', 'woocommerce-gateway-revenuemonster'));
 			}
 
-			$order = new WC_Order($order_id[0]);
-			$sdk   = $this->get_sdk();
+			// The server notify may have already confirmed the order before the
+			// customer's browser made it back here.
+			if ($order->is_paid()) {
+				$finish($order, $order->get_checkout_order_received_url());
+			}
+
+			// Trust the browser's ?status= only to fail an order, never to pay it.
+			if ($is_browser) {
+				$reported = strtoupper(sanitize_key(wp_unslash($_GET['status'])));
+				if (in_array($reported, array('EXPIRED', 'CANCELLED', 'CANCEL', 'FAILED', 'FAIL'), true)) {
+					if (! $order->has_status(array('cancelled', 'failed', 'refunded'))) {
+						$order->update_status('failed', sprintf(
+							/* translators: %s: payment status reported by RevenueMonster */
+							__('Payment not completed (RevenueMonster reported: %s).', 'woocommerce-gateway-revenuemonster'),
+							$reported
+						));
+					}
+					$finish($order, $order->get_checkout_payment_url(), __('Your payment was not completed. You can try again below.', 'woocommerce-gateway-revenuemonster'));
+				}
+			}
+
+			$sdk = $this->get_sdk();
 
 			try {
 				$response = $sdk->query_order($oid);
 
-				$order->set_payment_method($response->method);
+				if (! empty($response->method)) {
+					$order->set_payment_method($response->method);
+				}
 
 				$order->save();
 
@@ -383,19 +846,37 @@ function wc_gateway_revenuemonster_init()
 					case 'SUCCESS':
 						$obj = json_decode(json_encode($response), true);
 						$order->payment_complete($obj['transactionId']);
-						WC()->cart->empty_cart();
-						wp_redirect($order->get_checkout_order_received_url());
+						if (WC()->cart) {
+							WC()->cart->empty_cart();
+						}
+						$finish($order, $order->get_checkout_order_received_url());
 						break;
 					default:
 						throw new Exception('invalid payment status');
 				}
 			} catch (Exception $e) {
 				// https://docs.woocommerce.com/document/managing-orders/.
-				// mark as failed.
-				$order->update_status('failed', __('Payment failed', 'woocommerce-gateway-revenuemonster'));
-				$order->save();
-				wp_die('RevenueMonster payment failed', 'RevenueMonster Payment', array('response' => 500));
+				// Mark failed (not cancelled) so WooCommerce lets the customer retry
+				if (! $order->has_status(array('cancelled', 'failed'))) {
+					$order->update_status('failed', __('Payment failed', 'woocommerce-gateway-revenuemonster'));
+				}
+				self::log('Webhook could not confirm order ' . $order->get_id() . ' (' . $oid . '): ' . $e->getMessage(), 'warning');
+				$finish($order, $order->get_checkout_payment_url(), __('Your payment was not completed. You can try again below.', 'woocommerce-gateway-revenuemonster'));
 			}
 		}
 	}
+
+	// Registered at bootstrap, not in the constructor: WooCommerce does not
+	// instantiate gateway objects on plain admin-ajax.php requests.
+	add_action('wp_ajax_rm_direct_card_status', 'wc_revenuemonster_ajax_card_status');
+	add_action('wp_ajax_nopriv_rm_direct_card_status', 'wc_revenuemonster_ajax_card_status');
+}
+
+/**
+ * Bridge the wp_ajax hook to the gateway instance method.
+ */
+function wc_revenuemonster_ajax_card_status()
+{
+	$gateway = new WC_Gateway_RevenueMonster();
+	$gateway->ajax_card_status();
 }

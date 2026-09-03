@@ -1,5 +1,11 @@
 *** WooCommerce RevenueMonster Payment Gateway ***
 
+2026-09-03 - version 1.0.10
+
+Feat: Direct Card Checkout now works in the WooCommerce Cart & Checkout Blocks
+      checkout (native card form, 3-D Secure iframe, status polling), matching
+      the classic [woocommerce_checkout] flow. Hosted Checkout is unchanged.
+
 2025-09-29 - version 1.0.9
 * Latest Release
 
