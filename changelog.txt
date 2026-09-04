@@ -1,5 +1,11 @@
 *** WooCommerce RevenueMonster Payment Gateway ***
 
+2026-09-04 - version 1.0.11
+
+Change: Direct Card availability is checked against the Revenue Monster account
+        live on each checkout, so toggling it on the RM dashboard takes effect
+        without re-saving the gateway settings.
+
 2026-09-03 - version 1.0.10
 
 Feat: Direct Card Checkout now works in the WooCommerce Cart & Checkout Blocks
