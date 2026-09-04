@@ -114,6 +114,13 @@ function wc_gateway_revenuemonster_init()
 		public static $log = false;
 
 		/**
+		 * Per-request memo for the live Direct Card capability check.
+		 *
+		 * @var bool|null
+		 */
+		protected $card_capability_live = null;
+
+		/**
 		 * Construct
 		 */
 		public function __construct()
@@ -139,6 +146,9 @@ function wc_gateway_revenuemonster_init()
 			if (is_admin()) {
 				// This action hook saves the settings.
 				add_action('woocommerce_update_options_payment_gateways_' . $this->id, array($this, 'process_admin_options'));
+				// Direct Card capability warning, rendered outside #mainform so it
+				// does not interfere with WooCommerce's unsaved-changes detection.
+				add_action('admin_notices', array($this, 'render_card_capability_notice'));
 			}
 
 			// Register a webhook.
@@ -171,27 +181,47 @@ function wc_gateway_revenuemonster_init()
 		}
 
 		/**
-		 * Stored Direct Card capability flag, refreshed on each settings save.
+		 * Raw stored Direct Card capability flag (no API call).
 		 *
 		 * @return bool
 		 */
-		protected function card_capability_active()
+		protected function stored_card_capability()
 		{
 			return 'yes' === $this->get_option('card_online_active');
 		}
 
 		/**
-		 * Check RM account and persist whether Direct Card Checkout is
-		 * usable. Called on settings save only
+		 * Whether Direct Card Checkout is usable right now.
+		 *
+		 * Verifies against the Revenue Monster account live (once per request)
+		 * so that toggling Direct Card Payment on the RM dashboard takes effect
+		 * on the next checkout without re-saving the gateway settings. Falls
+		 * back to the stored flag when the API call fails.
+		 *
+		 * @return bool
+		 */
+		protected function card_capability_active()
+		{
+			if (null === $this->card_capability_live) {
+				$this->card_capability_live = $this->refresh_card_capability();
+			}
+
+			return $this->card_capability_live;
+		}
+
+		/**
+		 * Check the RM account and persist whether Direct Card Checkout is
+		 * usable. Runs on settings save and on the first capability check of
+		 * each request.
 		 * Requires BOTH: Card (Online) active in the subscription status, and an
-		 * active merchant with directCardPayment enabled. 
+		 * active merchant with directCardPayment enabled.
 		 *
 		 * @return bool
 		 */
 		protected function refresh_card_capability()
 		{
 			if (!$this->is_direct_card() || !$this->get_option('client_id')) {
-				return $this->card_capability_active();
+				return $this->stored_card_capability();
 			}
 
 			try {
@@ -201,10 +231,10 @@ function wc_gateway_revenuemonster_init()
 			} catch (Exception $e) {
 				self::log('Direct Card capability check failed: ' . $e->getMessage(), 'warning');
 
-				return $this->card_capability_active();
+				return $this->stored_card_capability();
 			}
 
-			if ($available !== $this->card_capability_active()) {
+			if ($available !== $this->stored_card_capability()) {
 				$this->update_option('card_online_active', $available ? 'yes' : 'no');
 			}
 
@@ -273,7 +303,7 @@ function wc_gateway_revenuemonster_init()
 			}
 
 			$base = plugins_url('assets/', __FILE__);
-			$ver  = '1.0.10';
+			$ver  = WC_REVENUEMONSTER_VERSION;
 
 			wp_enqueue_style('rm-direct-card', $base . 'css/rm-direct-card.css', array(), $ver);
 			wp_enqueue_script('rm-direct-card', $base . 'js/rm-direct-card.js', array('jquery', 'wc-checkout'), $ver, true);
@@ -526,16 +556,49 @@ function wc_gateway_revenuemonster_init()
 		/**
 		 * Settings screen: while "Direct Card Checkout" is selected, warn if the
 		 * account does not support it.
+		 *
+		 * Hooked to admin_notices (not echoed from admin_options) so the notice
+		 * sits in WordPress's notice area above the form. Echoing it inside
+		 * #mainform let WordPress relocate the node on load, which broke
+		 * WooCommerce's "Save changes" enable-on-change detection for the
+		 * Card Checkout Mode dropdown.
 		 */
-		public function admin_options()
+		public function render_card_capability_notice()
 		{
-			if ($this->is_direct_card() && $this->get_option('client_id') && !$this->card_capability_active()) {
-				echo '<div class="notice notice-warning inline"><p>';
-				echo wp_kses_post(__('<strong>Direct Card Checkout</strong> is not enabled on this Revenue Monster account, so selecting it will fall back to the hosted Revenue Monster page. Ask Revenue Monster to enable Direct Card Payment, then re-save these settings.', 'woocommerce-gateway-revenuemonster'));
-				echo '</p></div>';
+			// The gateway is instantiated more than once per request, so this
+			// callback can be hooked several times; only ever print it once.
+			static $printed = false;
+
+			if ($printed) {
+				return;
 			}
 
-			parent::admin_options();
+			if (!function_exists('get_current_screen')) {
+				return;
+			}
+
+			$screen = get_current_screen();
+
+			if (!$screen || 'woocommerce_page_wc-settings' !== $screen->id) {
+				return;
+			}
+
+			$tab     = isset($_GET['tab']) ? sanitize_key(wp_unslash($_GET['tab'])) : '';
+			$section = isset($_GET['section']) ? sanitize_key(wp_unslash($_GET['section'])) : '';
+
+			if ('checkout' !== $tab || $this->id !== $section) {
+				return;
+			}
+
+			if (!$this->is_direct_card() || !$this->get_option('client_id') || $this->card_capability_active()) {
+				return;
+			}
+
+			$printed = true;
+
+			echo '<div class="notice notice-warning"><p>';
+			echo wp_kses_post(__('<strong>Direct Card Checkout</strong> is not enabled on this Revenue Monster account, so selecting it will fall back to the hosted Revenue Monster page. Ask Revenue Monster to enable Direct Card Payment, then re-save these settings.', 'woocommerce-gateway-revenuemonster'));
+			echo '</p></div>';
 		}
 
 		/**

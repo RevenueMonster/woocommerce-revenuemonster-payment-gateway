@@ -78,7 +78,7 @@ final class WC_RevenueMonster_Blocks_Support extends AbstractPaymentMethodType
 			'rm-blocks',
 			WC_REVENUEMONSTER_URL . 'assets/js/rm-blocks.js',
 			array('wc-blocks-registry', 'wc-settings', 'wp-element', 'wp-html-entities'),
-			file_exists($js) ? (string) filemtime($js) : '1.0.10',
+			file_exists($js) ? (string) filemtime($js) : WC_REVENUEMONSTER_VERSION,
 			true
 		);
 
@@ -87,7 +87,7 @@ final class WC_RevenueMonster_Blocks_Support extends AbstractPaymentMethodType
 			'rm-direct-card',
 			WC_REVENUEMONSTER_URL . 'assets/css/rm-direct-card.css',
 			array(),
-			file_exists($css) ? (string) filemtime($css) : '1.0.10'
+			file_exists($css) ? (string) filemtime($css) : WC_REVENUEMONSTER_VERSION
 		);
 
 		return array('rm-blocks');
